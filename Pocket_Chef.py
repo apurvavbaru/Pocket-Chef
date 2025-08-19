@@ -15,6 +15,58 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
+import os, hashlib, subprocess, sys, requests
+
+DB_PATH = os.getenv("DB_PATH", "foodrecipes.db")
+DB_GDRIVE_ID = os.getenv("DB_GDRIVE_ID")  # put in Streamlit Secrets
+DB_URL = os.getenv("DB_URL")              # optional: direct URL fallback
+
+def _file_sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def ensure_db():
+    # If DB already present and non-empty, we’re done
+    if os.path.exists(DB_PATH) and os.path.getsize(DB_PATH) > 1024:
+        return
+
+    # Try gdown if we have a Drive file id
+    if DB_GDRIVE_ID:
+        try:
+            import gdown  # installed via requirements.txt
+        except ImportError:
+            # attempt runtime install (works on Streamlit Cloud)
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "gdown"])
+            import gdown
+
+        url = f"https://drive.google.com/uc?id={DB_GDRIVE_ID}"
+        gdown.download(url, DB_PATH, quiet=False)
+        if os.path.exists(DB_PATH) and os.path.getsize(DB_PATH) > 1024:
+            return
+        else:
+            raise RuntimeError("Downloaded from Google Drive but DB file looks empty.")
+
+    # Optional: fallback to a direct URL (S3/HuggingFace/etc.)
+    if DB_URL:
+        r = requests.get(DB_URL, timeout=300)
+        r.raise_for_status()
+        with open(DB_PATH, "wb") as f:
+            f.write(r.content)
+        if os.path.getsize(DB_PATH) > 1024:
+            return
+        else:
+            raise RuntimeError("Downloaded from DB_URL but DB file looks empty.")
+
+    raise RuntimeError(
+        "Database not found and no DB_GDRIVE_ID/DB_URL provided. "
+        "Set one in Streamlit Secrets."
+    )
+
+# Call this before you open SQLite
+ensure_db()
 
 # ------------------- Env / flags -------------------
 load_dotenv()
@@ -1124,7 +1176,7 @@ with col_rec:
     if inv_now.empty:
         st.info("Add inventory items first.")
     else:
-        st.markdown("### Plan with agent")
+        #st.markdown("### Plan with agent")
 
         # Clicking this triggers planning only once and stores a list of up to 3 plans
         if st.button("Plan my meal"):
