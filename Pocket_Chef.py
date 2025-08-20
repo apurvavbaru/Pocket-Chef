@@ -410,6 +410,114 @@ def to_float_or_none(x):
     except Exception:
         return None
 
+def inv_key(name: str) -> str:
+    # same normalization used for matching
+    return ingredient_key(name or "")
+
+def _best_per_gram_for_row(inv_row: pd.Series) -> Optional[dict]:
+    """Return per-gram macros for a row, trying existing values, cache/lookup, or GPT."""
+    per = per_gram_from_row(inv_row)
+    if per: 
+        return per
+    # Last resort: try to derive from an estimate using 100g as the scaler
+    est = estimate_from_lookup_or_cache_or_gpt(inv_row["item_name"], 100.0)
+    if est:
+        return dict(
+            cal=est["calories"]/100.0, p=est["protein_g"]/100.0, f=est["fat_g"]/100.0,
+            c=est["carbs_g"]/100.0, s=est["sugar_g"]/100.0
+        )
+    return None
+
+def upsert_inventory_row_merged(row: Dict[str, Any]):
+    """
+    Merge with existing row if same ingredient (normalized).
+    - Sums grams.
+    - Recomputes calories/protein/fat/carbs/sugar using per-gram macros.
+    - If no existing row, inserts with auto-estimate when grams provided.
+    """
+    name = (row.get("item_name") or "").strip()
+    grams_new = to_float_or_none(row.get("grams"))
+    if not name:
+        return
+
+    # Load current inventory and find matches by normalized key
+    cur = get_inventory_df().copy()
+    cur["ikey"] = cur["item_name"].apply(inv_key)
+    target_key = inv_key(name)
+    match = cur[cur["ikey"] == target_key]
+
+    # No existing row: estimate macros if grams are present, then insert
+    if match.empty:
+        if grams_new is not None:
+            est = estimate_from_lookup_or_cache_or_gpt(name, grams_new)
+            if est:
+                row.update(est)
+        insert_inventory_row(row)
+        return
+
+    # Merge into the first matching row
+    base = match.iloc[0]
+    base_id = int(base["id"])
+    grams_old = float(base.get("grams") or 0.0)
+    grams_tot = float(max(0.0, (grams_old or 0.0))) + float(max(0.0, grams_new or 0.0))
+
+    # Decide per-gram macros to use
+    per = _best_per_gram_for_row(base)
+    # If base didn’t have usable per-gram and we do have a new grams, try estimate from the incoming item
+    if per is None and grams_new:
+        est = estimate_from_lookup_or_cache_or_gpt(name, grams_new)
+        if est and grams_new > 0:
+            per = dict(
+                cal=est["calories"]/grams_new, p=est["protein_g"]/grams_new,
+                f=est["fat_g"]/grams_new, c=est["carbs_g"]/grams_new, s=est["sugar_g"]/grams_new
+            )
+
+    # Compute new macro totals
+    if per:
+        cal = round(per["cal"] * grams_tot, 1)
+        p   = round(per["p"]   * grams_tot, 1)
+        f   = round(per["f"]   * grams_tot, 1)
+        c   = round(per["c"]   * grams_tot, 1)
+        s   = round(per["s"]   * grams_tot, 1)
+    else:
+        # If we still don’t have per‑gram, keep existing macros and only bump grams
+        cal = to_float_or_none(base.get("calories"))
+        p   = to_float_or_none(base.get("protein_g"))
+        f   = to_float_or_none(base.get("fat_g"))
+        c   = to_float_or_none(base.get("carbs_g"))
+        s   = to_float_or_none(base.get("sugar_g"))
+
+    run_sql(
+        """UPDATE inventory
+           SET item_name=?, grams=?, calories=?, protein_g=?, fat_g=?, carbs_g=?, sugar_g=?, is_estimate=?, updated_at=datetime('now')
+           WHERE id=?""",
+        (base["item_name"], grams_tot, cal, p, f, c, s, 1, base_id)
+    )
+
+def merge_all_duplicates_now() -> int:
+    """
+    Consolidate duplicates across the entire table.
+    Returns the number of rows removed (merged away).
+    """
+    inv = get_inventory_df().copy()
+    if inv.empty:
+        return 0
+    inv["ikey"] = inv["item_name"].apply(inv_key)
+    removed = 0
+
+    # For each key, keep the most recent row and merge others into it
+    for key, group in inv.groupby("ikey", sort=False):
+        if len(group) <= 1:
+            continue
+        # Keep the newest row (first due to ORDER BY updated_at DESC in get_inventory_df)
+        keeper = group.iloc[0]
+        for _, g in group.iloc[1:].iterrows():
+            # treat each as an incoming upsert into the keeper
+            upsert_inventory_row_merged({"item_name": keeper["item_name"], "grams": g.get("grams")})
+            delete_inventory_row(int(g["id"]))
+            removed += 1
+    return removed
+
 # ------------------- Parsing helpers for recipe text -------------------
 _qstr = r'"([^"\\]*(?:\\.[^"\\]*)*)"'
 _qs   = r"'([^'\\]*(?:\\.[^'\\]*)*)'"
@@ -1076,12 +1184,10 @@ with col_inv:
         if st.button("Add to inventory"):
             rows = parse_inventory_text(inv_text)
             for r in rows:
-                est = estimate_from_lookup_or_cache_or_gpt(r["item_name"], r.get("grams"))
-                if est:
-                    r.update(est)  # adds calories, protein_g, fat_g, carbs_g, sugar_g, is_estimate=1
-                insert_inventory_row(r)
-            st.success(f"Added {len(rows)} item(s).")
-            # prevent any suggestions until the user explicitly plans
+                # Upsert: merge into an existing row with same ingredient (normalized),
+                # scale nutrition for the new total g, estimating per‑100g if needed.
+                upsert_inventory_row_merged(r)
+            st.success(f"Added/merged {len(rows)} item(s).")
             st.session_state.planned = False
             st.session_state.plan = None
             safe_rerun()
