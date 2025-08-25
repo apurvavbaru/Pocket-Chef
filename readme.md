@@ -1,6 +1,8 @@
 # Pocket Chef 🍳  
 *An agentic meal planner that helps you cook with what you already have in your pantry.*
 
+![Sneek Peek](Pocketchef.gif)
+
 ---
 
 ## ✨ Features
@@ -13,14 +15,12 @@
 ---
 
 ## 📸 Demo
-![Pocket Chef Demo](PocketChef.mp4)  
-
 **Team behind Pocket Chef:**  
 ![Team Photo](pocket-chef-team.jpg)   
 
+[![Pocket Chef Full DEmo](https://img.shields.io/badge/Watch%20demo-Google%20Drive-4285F4?logo=google-drive&logoColor=white)](https://drive.google.com/file/d/13tmXJ1SUA7AI__HTj2JRvUTPxbJsrA5s/view?usp=sharing)
 
-**Live demo on Streamlit:**
-![Live_demo](https://pocket-chef.streamlit.app/) 
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://pocket-chef.streamlit.app/)
 
 ---
 
